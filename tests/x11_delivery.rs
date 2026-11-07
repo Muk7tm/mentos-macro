@@ -6,8 +6,9 @@
 //! ```
 //!
 //! and do not touch the keyboard or mouse for a few seconds. Safety: the macro runs with
-//! focus protection restricted to the WM_CLASS of a window created by the test, so if that
-//! window is not focused nothing is sent anywhere (the test then fails instead).
+//! focus protection restricted to the WM_CLASS of a window created by the test, and clicks
+//! additionally require the pointer over that window (the test moves it there and back),
+//! so if the window is not focused nothing is sent anywhere (the test then fails instead).
 
 use mentos_macro::config::{ActivationMode, Hotkeys, InputConfig, LoopConfig};
 use mentos_macro::engine::{Command, EngineEvent, EngineHandle, RunSpec, StopReason, X11Platform};
@@ -32,6 +33,7 @@ struct TestWindow {
     root: Window,
     win: Window,
     keymap: Keymap,
+    pointer_home: (i16, i16),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,9 +74,34 @@ impl TestWindow {
         conn.map_window(win).unwrap();
         conn.flush().unwrap();
         let keymap = Keymap::load(&conn).unwrap();
-        let tw = TestWindow { conn, root, win, keymap };
+        let home = conn.query_pointer(root).unwrap().reply().unwrap();
+        let tw = TestWindow { conn, root, win, keymap, pointer_home: (home.root_x, home.root_y) };
         tw.activate();
+        tw.pointer_into();
         tw
+    }
+
+    /// Mouse events go to the window under the pointer: move it into the test window and
+    /// require the EnterNotify that proves the window is really under it.
+    fn pointer_into(&self) {
+        self.conn.warp_pointer(x11rb::NONE, self.win, 0, 0, 0, 0, 160, 110).unwrap();
+        self.conn.flush().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            while let Some(ev) = self.conn.poll_for_event().unwrap() {
+                if matches!(ev, Event::EnterNotify(e) if e.event == self.win) {
+                    return;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        self.restore_pointer();
+        panic!("pointer is not over the test window; nothing was sent");
+    }
+
+    fn restore_pointer(&self) {
+        let _ = self.conn.warp_pointer(x11rb::NONE, self.root, 0, 0, 0, 0, self.pointer_home.0, self.pointer_home.1);
+        let _ = self.conn.flush();
     }
 
     fn atom(&self, name: &str) -> Atom {
@@ -127,6 +154,7 @@ impl TestWindow {
 
 impl Drop for TestWindow {
     fn drop(&mut self) {
+        self.restore_pointer();
         let _ = self.conn.destroy_window(self.win);
         let _ = self.conn.flush();
     }
@@ -184,19 +212,29 @@ fn default_sequence_via(backend: BackendKind) {
     assert_eq!(reason, StopReason::Completed, "{message}");
     let events = tw.collect(Duration::from_millis(150));
 
-    let got: Vec<(Keysym, bool)> =
-        events.iter().filter_map(|e| if let XEv::Key(k, d, _) = e { Some((*k, *d)) } else { None }).collect();
-    let expected: Vec<(Keysym, bool)> = ['5', '6', '7', '8', '9', '0']
+    let got: Vec<XEv> = events
+        .iter()
+        .map(|e| match *e {
+            XEv::Key(k, d, _) => XEv::Key(k, d, 0),
+            XEv::Button(b, d, _) => XEv::Button(b, d, 0),
+        })
+        .collect();
+    let expected: Vec<XEv> = ['5', '6', '7', '8', '9', '0']
         .into_iter()
         .flat_map(|c| {
             let c = c as Keysym;
-            [(c, true), (c, false), (keys::XK_TAB, true), (keys::XK_TAB, false)]
+            [XEv::Key(c, true, 0), XEv::Key(c, false, 0), XEv::Button(1, true, 0), XEv::Button(1, false, 0)]
         })
         .collect();
-    assert_eq!(got, expected, "keys received by the X client");
+    assert_eq!(got, expected, "keys and left clicks received by the X client");
 
     // X server timestamps (ms): holds >= 25 ms and gaps >= 15 ms (1 ms clock granularity).
-    let times: Vec<(bool, u32)> = events.iter().filter_map(|e| if let XEv::Key(_, d, t) = e { Some((*d, *t)) } else { None }).collect();
+    let times: Vec<(bool, u32)> = events
+        .iter()
+        .map(|e| match *e {
+            XEv::Key(_, d, t) | XEv::Button(_, d, t) => (d, t),
+        })
+        .collect();
     let mut holds = Vec::new();
     let mut gaps = Vec::new();
     for w in times.windows(2) {
@@ -213,22 +251,6 @@ fn default_sequence_via(backend: BackendKind) {
 #[ignore = "needs an X11 session; run with --ignored"]
 fn combinations_and_mouse_holds_are_delivered() {
     let tw = TestWindow::open();
-    // Mouse events go to the window under the pointer: move it into the test window and
-    // require the EnterNotify that proves the window is really under it.
-    let original = tw.conn.query_pointer(tw.root).unwrap().reply().unwrap();
-    tw.conn.warp_pointer(x11rb::NONE, tw.win, 0, 0, 0, 0, 160, 110).unwrap();
-    tw.conn.flush().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(1);
-    let mut entered = false;
-    while Instant::now() < deadline && !entered {
-        while let Some(ev) = tw.conn.poll_for_event().unwrap() {
-            if matches!(ev, Event::EnterNotify(e) if e.event == tw.win) {
-                entered = true;
-            }
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    assert!(entered, "pointer is not over the test window; nothing was sent");
 
     let mut hold_left = Step::mouse(ActionKind::MouseHold, MouseButton::Left);
     hold_left.duration_ms = Some(80);
@@ -248,8 +270,6 @@ fn combinations_and_mouse_holds_are_delivered() {
     };
     let (reason, message) = run_once(spec);
     let events = tw.collect(Duration::from_millis(150));
-    tw.conn.warp_pointer(x11rb::NONE, tw.root, 0, 0, 0, 0, original.root_x, original.root_y).unwrap();
-    tw.conn.flush().unwrap();
     assert_eq!(reason, StopReason::Completed, "{message}");
 
     let shape: Vec<String> = events

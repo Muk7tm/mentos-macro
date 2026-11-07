@@ -4,7 +4,7 @@
 use mentos_macro::config::{FocusLoss, Hotkeys, InputConfig, LoopConfig};
 use mentos_macro::engine::{Command, EngineEvent, EngineHandle, Platform, RunSpec, RunState, StopReason};
 use mentos_macro::input::{BackendKind, InputBackend, InputResult, KeyLoc, KeyResolver};
-use mentos_macro::keys::{KeyCombo, Keysym, MouseButton, XK_TAB};
+use mentos_macro::keys::{KeyCombo, Keysym, MouseButton};
 use mentos_macro::safety::WindowInfo;
 use mentos_macro::sequence::{ActionKind, Sequence, Step, Timing};
 use std::sync::mpsc::{self, Receiver};
@@ -53,7 +53,14 @@ const OWN_PID: u32 = 1;
 struct MockPlatform {
     log: Log,
     focus: Arc<Mutex<Option<WindowInfo>>>,
+    /// `None`: the pointer follows focus (is over the focused window); `Some(x)`: forced.
+    pointer: Arc<Mutex<Option<Option<u32>>>>,
     backend: Option<MockBackend>,
+}
+
+/// Mock frames: the WM frame of client window N is N + 1000.
+fn frame(id: u32) -> u32 {
+    id + 1000
 }
 
 impl Platform for MockPlatform {
@@ -75,6 +82,15 @@ impl Platform for MockPlatform {
     fn focus(&mut self) -> Result<Option<WindowInfo>, String> {
         Ok(self.focus.lock().unwrap().clone())
     }
+    fn top_level_of(&mut self, window: u32) -> Result<Option<u32>, String> {
+        Ok(Some(frame(window)))
+    }
+    fn pointer_top_level(&mut self) -> Result<Option<u32>, String> {
+        match *self.pointer.lock().unwrap() {
+            Some(forced) => Ok(forced),
+            None => Ok(self.focus.lock().unwrap().as_ref().map(|w| frame(w.id))),
+        }
+    }
     fn own_pid(&self) -> u32 {
         OWN_PID
     }
@@ -95,19 +111,26 @@ struct Harness {
     events: Receiver<EngineEvent>,
     log: Log,
     focus: Arc<Mutex<Option<WindowInfo>>>,
+    pointer: Arc<Mutex<Option<Option<u32>>>>,
 }
 
 impl Harness {
     fn new(initial_focus: WindowInfo) -> Harness {
         let log: Log = Arc::default();
         let focus = Arc::new(Mutex::new(Some(initial_focus)));
+        let pointer = Arc::new(Mutex::new(None));
         let (tx, events) = mpsc::channel();
-        let (l, f) = (log.clone(), focus.clone());
-        let engine = EngineHandle::spawn(move || MockPlatform { log: l, focus: f, backend: None }, move |ev| {
+        let (l, f, p) = (log.clone(), focus.clone(), pointer.clone());
+        let engine = EngineHandle::spawn(move || MockPlatform { log: l, focus: f, pointer: p, backend: None }, move |ev| {
             let _ = tx.send(ev);
         })
         .unwrap();
-        Harness { engine, events, log, focus }
+        Harness { engine, events, log, focus, pointer }
+    }
+
+    /// Force the top-level window under the pointer (`None` = over nothing).
+    fn set_pointer(&self, top: Option<u32>) {
+        *self.pointer.lock().unwrap() = Some(top);
     }
 
     fn update(&self, spec: RunSpec) {
@@ -174,20 +197,20 @@ fn default_sequence_runs_in_order_with_configured_timing() {
     assert_eq!((reason, cycles), (StopReason::Completed, 1));
 
     let events = h.events();
-    let keys: Vec<Ev> = events.iter().map(|(_, e)| *e).collect();
-    let tab = (XK_TAB & 0xff) as u8;
+    let edges: Vec<Ev> = events.iter().map(|(_, e)| *e).collect();
+    let click = |down| Ev::Button(MouseButton::Left, down);
     let expected: Vec<Ev> = b"567890"
         .iter()
         .copied()
-        .flat_map(|d| [Ev::Key(d, true), Ev::Key(d, false), Ev::Key(tab, true), Ev::Key(tab, false)])
+        .flat_map(|d| [Ev::Key(d, true), Ev::Key(d, false), click(true), click(false)])
         .collect();
-    assert_eq!(keys, expected);
+    assert_eq!(edges, expected);
 
-    // Each hold >= 25 ms and each gap >= 15 ms (1 ms absorb tolerance), without large drift.
+    // Each hold (key or click) >= 25 ms and each gap >= 15 ms (1 ms absorb tolerance).
     for pair in events.windows(2) {
         let dt = pair[1].0 - pair[0].0;
         let (min, label) = match pair[0].1 {
-            Ev::Key(_, true) => (Duration::from_millis(24), "hold"),
+            Ev::Key(_, true) | Ev::Button(_, true) => (Duration::from_millis(24), "hold"),
             _ => (Duration::from_millis(14), "gap"),
         };
         assert!(dt >= min, "{label} too short: {dt:?}");
@@ -428,4 +451,48 @@ fn shutdown_mid_run_releases_input() {
     h.wait_log_len(1);
     h.engine.shutdown();
     assert_eq!(h.events().iter().map(|(_, e)| *e).collect::<Vec<_>>(), [Ev::Key(A, true), Ev::Key(A, false)]);
+}
+
+#[test]
+fn clicks_wait_until_the_pointer_is_over_the_target() {
+    let h = Harness::new(game());
+    h.set_pointer(Some(frame(other_window().id)));
+    h.update(spec(Sequence::default_sequence(), Timing::default(), ONCE));
+    h.engine.send(Command::Start);
+    match h.wait_event(Duration::from_secs(2), |e| matches!(e, EngineEvent::State { state: RunState::WaitingForTarget, .. })) {
+        EngineEvent::State { detail, .. } => assert!(detail.contains("pointer"), "{detail}"),
+        _ => unreachable!(),
+    }
+    std::thread::sleep(Duration::from_millis(40));
+    assert!(h.events().is_empty(), "nothing is sent until the pointer is over the target");
+    h.set_pointer(Some(frame(game().id)));
+    assert_eq!(h.wait_finished(Duration::from_secs(3)).0, StopReason::Completed);
+}
+
+#[test]
+fn pointer_leaving_the_target_stops_a_clicking_sequence() {
+    let h = Harness::new(game());
+    let mut hold = Step::mouse(ActionKind::MouseHold, MouseButton::Left);
+    hold.duration_ms = Some(5_000);
+    h.update(spec(Sequence { steps: vec![hold] }, Timing::default(), ONCE));
+    h.engine.send(Command::Start);
+    h.wait_log_len(1);
+    h.set_pointer(None);
+    let (reason, _, message) = h.wait_finished(Duration::from_millis(500));
+    assert_eq!(reason, StopReason::FocusLost);
+    assert!(message.contains("pointer"), "{message}");
+    assert_eq!(
+        h.events().iter().map(|(_, e)| *e).collect::<Vec<_>>(),
+        [Ev::Button(MouseButton::Left, true), Ev::Button(MouseButton::Left, false)]
+    );
+}
+
+#[test]
+fn keyboard_only_sequences_do_not_need_the_pointer() {
+    let h = Harness::new(game());
+    h.set_pointer(None);
+    h.update(spec(Sequence { steps: vec![Step::press(k("A")), Step::press(k("B"))] }, Timing::default(), ONCE));
+    h.engine.send(Command::Start);
+    assert_eq!(h.wait_finished(Duration::from_secs(1)).0, StopReason::Completed);
+    assert_eq!(h.events().len(), 4);
 }

@@ -209,14 +209,21 @@ pub struct Sequence {
 }
 
 impl Sequence {
-    /// `5 → Tab → 6 → Tab → 7 → Tab → 8 → Tab → 9 → Tab → 0 → Tab`
+    /// `5 → click → 6 → click → 7 → click → 8 → click → 9 → click → 0 → click`
+    /// (each click is a left mouse button press held for the key duration).
     pub fn default_sequence() -> Sequence {
-        let tab = KeyCombo::new(keys::XK_TAB);
         let steps = ['5', '6', '7', '8', '9', '0']
             .into_iter()
-            .flat_map(|c| [Step::press(KeyCombo::new(c as Keysym)), Step::press(tab)])
+            .flat_map(|c| {
+                [Step::press(KeyCombo::new(c as Keysym)), Step::mouse(ActionKind::MousePress, MouseButton::Left)]
+            })
             .collect();
         Sequence { steps }
+    }
+
+    /// Whether running this sequence sends mouse-button events.
+    pub fn uses_mouse(&self) -> bool {
+        self.steps.iter().any(|s| s.action.uses_button())
     }
 
     fn preview_tokens(&self) -> Vec<String> {
@@ -224,12 +231,16 @@ impl Sequence {
             .iter()
             .map(|s| match s.action {
                 ActionKind::Press => s.key.map(|k| k.to_string()).unwrap_or_else(|| "?".into()),
+                ActionKind::MousePress => match s.button.unwrap_or_default() {
+                    MouseButton::Left => "Click".to_string(),
+                    other => format!("{} click", other.label()),
+                },
                 _ => s.title(),
             })
             .collect()
     }
 
-    /// Compact "5 › Tab › 6 …" preview for the main window.
+    /// Compact "5 › Click › 6 …" preview for the main window.
     pub fn preview(&self) -> String {
         self.preview_tokens().join("  ›  ")
     }
@@ -798,7 +809,9 @@ mod tests {
     fn default_sequence_order() {
         let s = Sequence::default_sequence();
         assert_eq!(s.steps.len(), 12);
-        assert_eq!(s.preview(), "5  ›  Tab  ›  6  ›  Tab  ›  7  ›  Tab  ›  8  ›  Tab  ›  9  ›  Tab  ›  0  ›  Tab");
+        assert_eq!(s.preview(), "5  ›  Click  ›  6  ›  Click  ›  7  ›  Click  ›  8  ›  Click  ›  9  ›  Click  ›  0  ›  Click");
+        assert!(s.uses_mouse());
+        assert!(!Sequence { steps: vec![Step::press(k("A"))] }.uses_mouse());
     }
 
     #[test]
@@ -814,7 +827,7 @@ mod tests {
                 assert!(l.ends_with('›'), "{text}");
             }
         }
-        assert!(lines.last().unwrap().ends_with("Tab"));
+        assert!(lines.last().unwrap().ends_with("Click"));
         let long = Sequence { steps: vec![Step::wait(10); 40] };
         let t = long.preview_wrapped(36, 2);
         assert_eq!(t.lines().count(), 2);
@@ -825,17 +838,22 @@ mod tests {
     fn default_sequence_compiles_to_down_up_pairs() {
         let t = Timing::default();
         let plan = compile(&Sequence::default_sequence(), &t, true, &ReservedKeys::default(), &FakeResolver).unwrap();
-        let keys: Vec<(Keysym, bool)> =
-            plan.ops.iter().filter_map(|o| if let Op::Key { sym, down, .. } = o { Some((*sym, *down)) } else { None }).collect();
-        let expected: Vec<(Keysym, bool)> = ['5', '6', '7', '8', '9', '0']
-            .into_iter()
-            .flat_map(|c| {
-                let c = c as Keysym;
-                [(c, true), (c, false), (keys::XK_TAB, true), (keys::XK_TAB, false)]
+        let edges: Vec<String> = plan
+            .ops
+            .iter()
+            .filter_map(|o| match o {
+                Op::Key { sym, down, .. } => Some(format!("{}{}", keys::key_label(*sym), if *down { "+" } else { "-" })),
+                Op::Button { button, down } => Some(format!("{}{}", button.label(), if *down { "+" } else { "-" })),
+                Op::Wait(_) => None,
             })
             .collect();
-        assert_eq!(keys, expected);
-        // 12 holds of 25 ms + 11 gaps of 15 ms; the 12th gap is the 40 ms loop delay
+        let expected: Vec<String> = ["5", "6", "7", "8", "9", "0"]
+            .into_iter()
+            .flat_map(|d| [format!("{d}+"), format!("{d}-"), "Left+".into(), "Left-".into()])
+            .collect();
+        assert_eq!(edges, expected);
+        assert_eq!(plan.buttons, [MouseButton::Left]);
+        // 12 holds (6 keys, 6 clicks) of 25 ms + 11 gaps of 15 ms; the 12th gap is the loop delay
         let waits: Vec<Duration> =
             plan.ops.iter().filter_map(|o| if let Op::Wait(d) = o { Some(*d) } else { None }).collect();
         assert_eq!(waits.len(), 23);

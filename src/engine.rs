@@ -109,6 +109,10 @@ pub trait Platform {
     /// Discard the backend after an error so the next run starts clean.
     fn reset_backend(&mut self);
     fn focus(&mut self) -> Result<Option<WindowInfo>, String>;
+    /// Top-level ancestor (WM frame) of `window`; `None` if it no longer exists.
+    fn top_level_of(&mut self, window: u32) -> Result<Option<u32>, String>;
+    /// Top-level window under the mouse pointer.
+    fn pointer_top_level(&mut self) -> Result<Option<u32>, String>;
     fn own_pid(&self) -> u32 {
         std::process::id()
     }
@@ -161,7 +165,22 @@ impl Platform for X11Platform {
     }
 
     fn focus(&mut self) -> Result<Option<WindowInfo>, String> {
-        let result = self.focus_conn()?.active();
+        self.with_x(|x| x.active())
+    }
+
+    fn top_level_of(&mut self, window: u32) -> Result<Option<u32>, String> {
+        self.with_x(|x| x.top_level_of(window))
+    }
+
+    fn pointer_top_level(&mut self) -> Result<Option<u32>, String> {
+        self.with_x(|x| x.pointer_top_level())
+    }
+}
+
+impl X11Platform {
+    /// Run an X query; on failure drop the connection so the next call reconnects.
+    fn with_x<T>(&mut self, f: impl FnOnce(&mut XFocus) -> Result<T, String>) -> Result<T, String> {
+        let result = f(self.focus_conn()?);
         if result.is_err() {
             self.focus = None;
         }
@@ -173,7 +192,8 @@ enum Interrupt {
     Stop,
     Emergency,
     Shutdown,
-    FocusLost,
+    /// Focus (or, for mouse sequences, the pointer) left the target window.
+    FocusLost(&'static str),
     Failed(String),
 }
 
@@ -181,6 +201,9 @@ enum Interrupt {
 struct Guard {
     protection: bool,
     target: Option<u32>,
+    /// Top-level window (WM frame) of the target. Set when the sequence clicks: mouse
+    /// events go to the window under the pointer, so the pointer must be over the target.
+    target_top: Option<u32>,
     policy: TargetPolicy,
 }
 
@@ -254,7 +277,7 @@ impl<P: Platform> Engine<P> {
             Err(Interrupt::Stop) => (StopReason::Stopped, String::new()),
             Err(Interrupt::Emergency) => (StopReason::Emergency, "Emergency stop".to_string()),
             Err(Interrupt::Shutdown) => (StopReason::Shutdown, String::new()),
-            Err(Interrupt::FocusLost) => (StopReason::FocusLost, "Stopped: the target window lost focus".to_string()),
+            Err(Interrupt::FocusLost(why)) => (StopReason::FocusLost, format!("Stopped: {why}")),
             Err(Interrupt::Failed(e)) => (StopReason::Failed, e),
         };
         self.release_all(reason == StopReason::Emergency);
@@ -292,9 +315,9 @@ impl<P: Platform> Engine<P> {
             own_pid: self.platform.own_pid(),
             own_class: OWN_WINDOW_CLASS,
         };
-        let target = self.acquire_target(&policy, &spec)?;
-        let guard = Guard { protection: spec.input.focus_protection, target: Some(target.id), policy };
-        self.set_state(RunState::Running, target.class.clone());
+        let needs_pointer = spec.input.focus_protection && !plan.buttons.is_empty();
+        let guard = self.acquire_target(policy, &spec, needs_pointer)?;
+        self.set_state(RunState::Running, "");
 
         let mut sched = Scheduler::new(Instant::now());
         let result = self.run_cycles(&plan, &spec, &guard, &mut sched, cycles);
@@ -314,11 +337,11 @@ impl<P: Platform> Engine<P> {
             let more = spec.looping.enabled && (spec.looping.count == 0 || *cycles + 1 < u64::from(spec.looping.count));
             match self.run_cycle(plan, guard, sched, more) {
                 Ok(()) => {}
-                Err(Interrupt::FocusLost) if spec.input.focus_loss == FocusLoss::Pause => {
+                Err(Interrupt::FocusLost(why)) if spec.input.focus_loss == FocusLoss::Pause => {
                     self.release_all(false);
-                    self.set_state(RunState::Paused, "Waiting for the target window");
+                    self.set_state(RunState::Paused, format!("Paused: {why}"));
                     self.wait_for_refocus(guard)?;
-                    self.set_state(RunState::Running, guard_label(guard));
+                    self.set_state(RunState::Running, "");
                     sched.reset(Instant::now());
                     continue; // restart the interrupted cycle from its first step
                 }
@@ -424,28 +447,53 @@ impl<P: Platform> Engine<P> {
         }
     }
 
-    fn check_focus(&mut self, guard: &Guard) -> Result<(), Interrupt> {
+    /// Is the guard's condition met right now? `Err` describes why not.
+    fn target_ok(&mut self, guard: &Guard) -> Result<Result<(), &'static str>, Interrupt> {
         let active = self.platform.focus().map_err(Interrupt::Failed)?;
-        let ok = match (&active, guard.protection) {
-            (Some(w), true) => Some(w.id) == guard.target,
-            (None, true) => false,
+        if !guard.protection {
             // Without protection only this app's own window is off limits.
-            (Some(w), false) => !guard.policy.is_own(w),
-            (None, false) => true,
-        };
-        if ok {
-            Ok(())
-        } else {
-            Err(Interrupt::FocusLost)
+            return Ok(match active {
+                Some(w) if guard.policy.is_own(&w) => Err("this window was focused"),
+                _ => Ok(()),
+            });
+        }
+        if active.map(|w| w.id) != guard.target {
+            return Ok(Err("the target window lost focus"));
+        }
+        if let Some(top) = guard.target_top {
+            if self.platform.pointer_top_level().map_err(Interrupt::Failed)? != Some(top) {
+                return Ok(Err("the pointer left the target window"));
+            }
+        }
+        Ok(Ok(()))
+    }
+
+    fn check_focus(&mut self, guard: &Guard) -> Result<(), Interrupt> {
+        match self.target_ok(guard)? {
+            Ok(()) => Ok(()),
+            Err(why) => Err(Interrupt::FocusLost(why)),
         }
     }
 
-    /// Wait until a window the policy accepts is focused and return it.
-    fn acquire_target(&mut self, policy: &TargetPolicy, spec: &RunSpec) -> Result<WindowInfo, Interrupt> {
+    /// Wait until a window the policy accepts is focused (and, for sequences that click,
+    /// under the pointer) and lock onto it.
+    fn acquire_target(&mut self, policy: TargetPolicy, spec: &RunSpec, needs_pointer: bool) -> Result<Guard, Interrupt> {
         loop {
             if let Some(w) = self.platform.focus().map_err(Interrupt::Failed)? {
                 if policy.eligible(&w) {
-                    return Ok(w);
+                    let protection = policy.protection;
+                    if !needs_pointer {
+                        return Ok(Guard { protection, target: Some(w.id), target_top: None, policy });
+                    }
+                    // `None`: the window was closed meanwhile; keep waiting.
+                    if let Some(top) = self.platform.top_level_of(w.id).map_err(Interrupt::Failed)? {
+                        if self.platform.pointer_top_level().map_err(Interrupt::Failed)? == Some(top) {
+                            return Ok(Guard { protection, target: Some(w.id), target_top: Some(top), policy });
+                        }
+                    }
+                    self.set_state(RunState::WaitingForTarget, "Move the pointer over the target window");
+                    self.wait_until(Instant::now() + Duration::from_millis(25), None)?;
+                    continue;
                 }
             }
             let detail = if spec.input.focus_protection && !spec.input.target_class.trim().is_empty() {
@@ -460,13 +508,7 @@ impl<P: Platform> Engine<P> {
 
     fn wait_for_refocus(&mut self, guard: &Guard) -> Result<(), Interrupt> {
         loop {
-            let focused = self.platform.focus().map_err(Interrupt::Failed)?;
-            let back = match (&focused, guard.protection) {
-                (Some(w), true) => Some(w.id) == guard.target,
-                (Some(w), false) => !guard.policy.is_own(w),
-                (None, protection) => !protection,
-            };
-            if back {
+            if self.target_ok(guard)?.is_ok() {
                 return Ok(());
             }
             self.wait_until(Instant::now() + Duration::from_millis(25), None)?;
@@ -507,10 +549,6 @@ impl<P: Platform> Drop for Engine<P> {
         // Covers panics inside the worker: never leave keys stuck down.
         self.release_all(false);
     }
-}
-
-fn guard_label(g: &Guard) -> String {
-    g.target.map(|t| format!("window 0x{t:x}")).unwrap_or_default()
 }
 
 /// Owner-side handle of the worker thread.

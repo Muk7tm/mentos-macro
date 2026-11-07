@@ -24,6 +24,11 @@ pub struct WindowInfo {
 /// Source of "which window has focus right now".
 pub trait FocusProbe {
     fn active(&mut self) -> Result<Option<WindowInfo>, String>;
+    /// Top-level ancestor (window-manager frame or the window itself) of `window`;
+    /// `None` if the window no longer exists.
+    fn top_level_of(&mut self, window: u32) -> Result<Option<u32>, String>;
+    /// Top-level window currently under the mouse pointer, if any.
+    fn pointer_top_level(&mut self) -> Result<Option<u32>, String>;
 }
 
 /// Decides which windows the macro may send input to.
@@ -137,6 +142,28 @@ impl FocusProbe for XFocus {
             self.dirty = false;
         }
         Ok(self.cached.clone())
+    }
+
+    fn top_level_of(&mut self, window: u32) -> Result<Option<u32>, String> {
+        let mut w = window;
+        // Reparenting window managers nest clients a few levels deep; cap the walk.
+        for _ in 0..16 {
+            let tree = match self.conn.query_tree(w).map_err(x_error)?.reply() {
+                Ok(t) => t,
+                Err(e) if is_gone(&e) => return Ok(None),
+                Err(e) => return Err(x_error(e)),
+            };
+            if tree.parent == self.root || tree.parent == x11rb::NONE {
+                return Ok(Some(w));
+            }
+            w = tree.parent;
+        }
+        Ok(Some(w))
+    }
+
+    fn pointer_top_level(&mut self) -> Result<Option<u32>, String> {
+        let p = self.conn.query_pointer(self.root).map_err(x_error)?.reply().map_err(x_error)?;
+        Ok((p.same_screen && p.child != x11rb::NONE).then_some(p.child))
     }
 }
 

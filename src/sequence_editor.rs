@@ -166,7 +166,7 @@ mod tests {
         let mut e = SequenceEditor::new(&Sequence::default_sequence());
         e.select(Some(0));
         e.move_selected(1);
-        assert_eq!(&titles(&e)[..2], ["Press Tab", "Press 5"]);
+        assert_eq!(&titles(&e)[..2], ["Click Left mouse", "Press 5"]);
         assert_eq!(e.selected(), Some(1));
         e.move_selected(-10);
         assert_eq!(e.selected(), Some(0));

@@ -1,8 +1,8 @@
 # Mentos Macro
 
-Keyboard sequence automation for Linux X11. By default it presses
-`5 → Tab → 6 → Tab → 7 → Tab → 8 → Tab → 9 → Tab → 0 → Tab` in a loop, with
-configurable timing. An optional step-based **Advanced Sequence Editor** lets you build
+Keyboard-and-click sequence automation for Linux X11. By default it presses
+`5 → click → 6 → click → 7 → click → 8 → click → 9 → click → 0 → click` in a loop
+(each click is a left mouse click), with configurable timing. An optional step-based **Advanced Sequence Editor** lets you build
 your own sequences of keys, key combinations, mouse buttons and waits.
 
 Mentos Macro is a standalone project. It shares nothing (code, assets, configuration or
@@ -73,7 +73,8 @@ The main window shows only:
 * **Start / Stop** (also on the hotkey, **F6** by default);
 * the small **settings** button.
 
-Typical use: press **F6** while the game window is focused. Press **F6** again to stop.
+Typical use: press **F6** while the game window is focused and the mouse pointer is over
+it (the clicks go to the window under the pointer). Press **F6** again to stop.
 **F9** is an emergency stop. If you click **Start** in the window instead, Mentos waits
 until you focus another window, then locks onto it.
 
@@ -177,8 +178,8 @@ channel, so stop commands are handled within microseconds, even during long hold
 CPU use is zero.
 
 Measured on the development machine (X server timestamps, 1 ms resolution, Balanced
-preset, both backends): holds were 25 ms in almost every case (single outliers of 26 and
-29 ms) and gaps 15–16 ms.
+preset, both backends, default sequence with clicks): key and click holds 24–26 ms, gaps
+14–17 ms (the server clock has 1 ms resolution).
 
 ## Hotkeys
 
@@ -205,8 +206,11 @@ with the macro's keys.
 
 * **Focus protection** (on by default): the macro locks onto the window that is focused
   when it starts (after the start delay) and only sends input while that window is focused.
-  If focus moves away it **stops** (default) or **pauses** (releases everything and resumes
-  from the start of the cycle when the window is focused again).
+  Mouse events go to the window *under the pointer*, so a sequence that clicks (the default
+  one does) additionally requires the pointer to stay over the target window; it waits for
+  that before starting. If focus or the pointer moves away it **stops** (default) or
+  **pauses** (releases everything and resumes from the start of the cycle when the window
+  is back). Keyboard-only sequences do not care where the pointer is.
 * **Target window** (optional): a WM_CLASS substring such as `sober`. With it set, the
   macro only starts on, and only types into, a matching window. **Detect** fills it in from
   the window you focus within 3 seconds. Find a class manually with `xprop WM_CLASS`.
@@ -289,7 +293,8 @@ submission is not proof of game compatibility.
 
 Suggested check with Sober:
 
-1. Start Sober and join an experience where the keys 5–0 and Tab have a visible effect.
+1. Start Sober and join an experience where the keys 5–0 and a left click have a visible
+   effect.
 2. In Mentos, set *Target window* via **Detect** while Sober is focused.
 3. Start with the **Stable** preset and Loop off; press F6 in the game and confirm that
    every key in the sequence registered.
@@ -304,17 +309,18 @@ cargo test                       # unit tests + engine behaviour tests (no X ser
 cargo test --test x11_delivery -- --ignored --test-threads=1
 ```
 
-The default tests (67) cover key parsing, the timing scheduler, validation and
+The default tests (70) cover key parsing, the timing scheduler, validation and
 compilation, configuration recovery, profiles, the editor model, and the execution engine
 against a mock backend: order, hold/gap timing, stop latency during holds and waits, focus
 loss (stop and pause), target locking, hotkey conflicts, single-worker guarantees,
-hold-to-run, emergency release, snapshot isolation, start-delay cancellation and shutdown
-cleanup.
+hold-to-run, emergency release, snapshot isolation, start-delay cancellation, shutdown
+cleanup, and the pointer rules for sequences that click.
 
 The ignored `x11_delivery` tests need an X11 session. They open a test window, let the
 window manager focus it, and verify what the X server actually delivers:
 
-* the default sequence with both backends, including server-side hold and gap timing;
+* the default sequence (keys and left clicks) with both backends, including server-side
+  hold and gap timing;
 * combinations and mouse holds;
 * the full hotkey path (F6 starts, keys reach the target while F6 is held, F6 stops,
   everything released);
@@ -332,6 +338,8 @@ other windows. Don't touch the keyboard or mouse while they run (about 4 seconds
   depends on your NumLock state.
 * Shifted symbols (e.g. `!`) are produced by adding Shift automatically, based on the
   current keyboard layout.
+* The pointer check compares top-level windows, so a separate popup window of the game
+  counts as "another window" for clicking sequences.
 * Focus detection uses `_NET_ACTIVE_WINDOW`. This works with every EWMH window manager;
   without one, the X input focus is used.
 * Running together with other macro tools works as long as hotkeys differ. Each
