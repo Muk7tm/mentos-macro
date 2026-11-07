@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Mentos Macro
+GenericName=Keyboard sequence macro
+Comment=Configurable keyboard sequence automation for X11
+Exec=@BINDIR@/mentos-macro
+Icon=mentos-macro
+Terminal=false
+Categories=Utility;
+StartupWMClass=mentos-macro

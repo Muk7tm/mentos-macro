@@ -1,0 +1,111 @@
+import { Theme } from "theme.slint";
+import { AppState, StepRow, StepEdit, PreviewLine } from "state.slint";
+import { Button, NumberField, Panel, Segmented, SettingRow, SettingsButton, Slider, Toggle } from "widgets.slint";
+import { SettingsPage } from "settings.slint";
+import { SequenceEditorPage } from "sequence_editor.slint";
+
+import "../assets/fonts/NotoSans-Regular.ttf";
+import "../assets/fonts/NotoSans-Medium.ttf";
+
+export { AppState, StepRow, StepEdit, PreviewLine }
+
+component MainPage inherits Rectangle {
+    VerticalLayout {
+        padding: Theme.padding;
+        spacing: Theme.spacing;
+
+        Panel {
+            border-color: AppState.run-state == 3 ? Theme.hover : Theme.border;
+            animate border-color { duration: 140ms; easing: ease-out; }
+            VerticalLayout {
+                padding-top: 9px;
+                padding-bottom: 10px;
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 4px;
+                Text {
+                    text: AppState.sequence-title;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-caption;
+                    overflow: elide;
+                }
+                Text {
+                    text: AppState.sequence-preview;
+                    color: Theme.text-strong;
+                    font-size: Theme.font-body;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        SettingRow {
+            label: "Loop";
+            Toggle { checked: AppState.loop-enabled; toggled(v) => { AppState.set-bool("loop", v); } }
+        }
+        SettingRow {
+            label: "Timing";
+            Segmented {
+                options: ["Fast", "Balanced", "Stable", "Custom"];
+                current: AppState.preset-index;
+                selected(i) => { AppState.select-preset(i); }
+            }
+        }
+        SettingRow {
+            label: "Key delay";
+            Slider {
+                horizontal-stretch: 3;
+                minimum: 0;
+                maximum: 200;
+                value: AppState.gap-ms;
+                changed(v) => { AppState.set-int("gap", v); }
+            }
+            NumberField { value: AppState.gap-ms; maximum: 10000; edited(v) => { AppState.set-int("gap", v); } }
+        }
+
+        Rectangle { vertical-stretch: 1; }
+
+        if AppState.status-text != "": Text {
+            text: AppState.status-text;
+            color: AppState.status-error ? Theme.text-strong : Theme.text-muted;
+            font-size: Theme.font-caption;
+            wrap: word-wrap;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Button {
+                text: AppState.run-label;
+                primary: true;
+                tall: true;
+                horizontal-stretch: 1;
+                clicked => { AppState.toggle-run(); }
+            }
+            SettingsButton { clicked => { AppState.navigate(1); } }
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "Mentos Macro";
+    icon: @image-url("../assets/icon.png");
+    background: Theme.background;
+    default-font-family: Theme.font-family;
+    default-font-size: Theme.font-body;
+    preferred-width: 380px;
+    preferred-height: 300px;
+    min-width: 340px;
+    min-height: 260px;
+
+    if AppState.page == 0: MainPage {
+        width: parent.width;
+        height: parent.height;
+    }
+    if AppState.page == 1: SettingsPage {
+        width: parent.width;
+        height: parent.height;
+    }
+    if AppState.page == 2: SequenceEditorPage {
+        width: parent.width;
+        height: parent.height;
+    }
+}

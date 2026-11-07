@@ -1,0 +1,116 @@
+// Application state shared by all pages. Rust owns the real state and mirrors it here;
+// pages report user intent through the callbacks.
+
+export struct StepRow {
+    title: string,
+    detail: string,
+    error: bool,
+}
+
+export struct PreviewLine {
+    time: string,
+    action: string,
+}
+
+export struct StepEdit {
+    kind: int,
+    key: string,
+    button: int,
+    duration: int,
+    hold-override: bool,
+    hold-ms: int,
+    delay-override: bool,
+    delay-ms: int,
+}
+
+export global AppState {
+    // Navigation: 0 = main, 1 = settings, 2 = sequence editor
+    in-out property <int> page: 0;
+    in-out property <int> settings-tab: 0;
+
+    // Main window
+    in-out property <string> sequence-title: "Default sequence";
+    in-out property <string> sequence-preview;
+    in-out property <bool> loop-enabled: true;
+    in-out property <int> preset-index: 1;
+    in-out property <int> key-ms: 25;
+    in-out property <int> gap-ms: 15;
+    in-out property <int> loop-ms: 40;
+    in-out property <int> modifier-ms: 5;
+    in-out property <int> start-delay-ms: 0;
+    in-out property <int> repeat-count: 0;
+    in-out property <int> activation-index: 0;
+    // 0 idle, 1 arming, 2 waiting for target, 3 running, 4 paused
+    in-out property <int> run-state: 0;
+    in-out property <string> run-label: "Start";
+    in-out property <string> status-text;
+    in-out property <bool> status-error;
+
+    // Hotkeys
+    in-out property <string> hotkey-start: "F6";
+    in-out property <string> hotkey-emergency: "F9";
+    in-out property <string> hotkey-status;
+    in-out property <bool> hotkey-ok: true;
+    // "" when idle, otherwise what is being captured: "start", "emergency" or "step"
+    in-out property <string> capture-target;
+
+    // Input
+    in-out property <int> backend-index: 0;
+    in-out property <bool> focus-protection: true;
+    in-out property <int> focus-loss-index: 0;
+    in-out property <string> target-class;
+    in-out property <bool> detecting;
+    in-out property <string> input-message;
+
+    // Profiles
+    in-out property <[string]> profiles;
+    in-out property <int> profile-index: -1;
+    in-out property <string> profile-message;
+    in-out property <bool> profile-error;
+    in-out property <string> active-profile;
+    in-out property <string> profiles-dir;
+
+    // Advanced sequence editor
+    in-out property <bool> custom-enabled;
+    in-out property <string> custom-summary;
+    in-out property <[string]> action-labels;
+    in-out property <[StepRow]> steps;
+    in-out property <int> selected-step: -1;
+    in-out property <StepEdit> edit;
+    in-out property <string> edit-error;
+    in-out property <string> validation-text;
+    in-out property <bool> sequence-valid: true;
+    in-out property <[PreviewLine]> preview-lines;
+    in-out property <bool> show-preview;
+
+    in-out property <string> config-path;
+
+    callback navigate(int);
+    callback toggle-run();
+    callback set-bool(string, bool);
+    callback set-int(string, int);
+    callback set-text(string, string);
+    callback select-preset(int);
+    callback capture(string);
+    callback cancel-capture();
+    callback detect-target();
+    callback reset-defaults();
+
+    callback profile-save(string);
+    callback profile-load(int);
+    callback profile-rename(int, string);
+    callback profile-duplicate(int);
+    callback profile-delete(int);
+    callback profile-export(int, string);
+    callback profile-import(string);
+
+    callback editor-add(int);
+    callback editor-select(int);
+    callback editor-delete();
+    callback editor-duplicate();
+    callback editor-move(int);
+    callback editor-reset();
+    callback editor-edit(StepEdit);
+    callback editor-key-text(string);
+    callback editor-preview();
+}

@@ -1,0 +1,296 @@
+import { Theme } from "theme.slint";
+import { AppState } from "state.slint";
+import {
+    BackButton, Button, ConfirmButton, Dropdown, ListItem, NumberField, Panel, ScrollPanel,
+    Segmented, SettingRow, TextField, Toggle,
+} from "widgets.slint";
+
+// "Add step" button with a menu of action types.
+component AddStepButton inherits Rectangle {
+    callback picked(int);
+    min-width: button.min-width;
+    height: button.height;
+    horizontal-stretch: 0;
+
+    button := Button {
+        width: parent.width;
+        text: "Add step";
+        primary: true;
+        clicked => { menu.show(); }
+    }
+
+    menu := PopupWindow {
+        x: 0;
+        y: root.height + 2px;
+        width: 170px;
+        Rectangle {
+            background: Theme.panel;
+            border-radius: Theme.radius-small;
+            border-width: Theme.border-width;
+            border-color: Theme.hover;
+            VerticalLayout {
+                padding: 3px;
+                spacing: 1px;
+                for label[i] in AppState.action-labels: Rectangle {
+                    height: 26px;
+                    border-radius: 3px;
+                    background: item.has-hover ? Theme.hover : transparent;
+                    animate background { duration: 140ms; easing: ease-out; }
+                    Text {
+                        x: 8px;
+                        width: parent.width - 16px;
+                        height: parent.height;
+                        text: label;
+                        color: Theme.text-strong;
+                        font-size: Theme.font-body;
+                        vertical-alignment: center;
+                    }
+                    item := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.picked(i); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Edit form for the selected step. Field visibility follows the action type
+// (indices match ActionKind::ALL in src/sequence.rs).
+component StepForm inherits Panel {
+    property <int> kind: AppState.edit.kind;
+    property <bool> uses-key: kind <= 3;
+    property <bool> uses-button: kind >= 4 && kind <= 7;
+    property <bool> uses-duration: kind == 3 || kind == 7 || kind == 8;
+    property <bool> uses-hold: kind == 0 || kind == 4;
+    property <bool> uses-delay: kind != 8;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+
+        SettingRow {
+            label: "Action";
+            Dropdown {
+                preferred-width: 190px;
+                horizontal-stretch: 0;
+                options: AppState.action-labels;
+                current: AppState.edit.kind;
+                selected(i) => {
+                    AppState.edit.kind = i;
+                    AppState.editor-edit(AppState.edit);
+                }
+            }
+        }
+        if root.uses-key: SettingRow {
+            label: "Key";
+            TextField {
+                preferred-width: 120px;
+                horizontal-stretch: 0;
+                text: AppState.capture-target == "step" ? "Press a key…" : AppState.edit.key;
+                highlight: AppState.capture-target == "step";
+                enabled: AppState.capture-target == "";
+                placeholder: "e.g. Shift+E";
+                accepted(t) => { AppState.editor-key-text(t); }
+            }
+            Button {
+                text: AppState.capture-target == "step" ? "Cancel" : "Capture";
+                enabled: AppState.capture-target == "" || AppState.capture-target == "step";
+                clicked => {
+                    if AppState.capture-target == "step" {
+                        AppState.cancel-capture();
+                    } else {
+                        AppState.capture("step");
+                    }
+                }
+            }
+        }
+        if root.uses-button: SettingRow {
+            label: "Mouse button";
+            Segmented {
+                options: ["Left", "Middle", "Right"];
+                current: AppState.edit.button;
+                selected(i) => {
+                    AppState.edit.button = i;
+                    AppState.editor-edit(AppState.edit);
+                }
+            }
+        }
+        if root.uses-duration: SettingRow {
+            label: root.kind == 8 ? "Wait for" : "Hold for";
+            NumberField {
+                value: AppState.edit.duration;
+                minimum: root.kind == 8 ? 0 : 1;
+                maximum: 60000;
+                edited(v) => {
+                    AppState.edit.duration = v;
+                    AppState.editor-edit(AppState.edit);
+                }
+            }
+        }
+        if root.uses-hold: SettingRow {
+            label: "Own hold time";
+            Toggle {
+                checked: AppState.edit.hold-override;
+                toggled(v) => {
+                    AppState.edit.hold-override = v;
+                    AppState.editor-edit(AppState.edit);
+                }
+            }
+            NumberField {
+                value: AppState.edit.hold-ms;
+                minimum: 1;
+                enabled: AppState.edit.hold-override;
+                edited(v) => {
+                    AppState.edit.hold-ms = v;
+                    AppState.editor-edit(AppState.edit);
+                }
+            }
+        }
+        if root.uses-delay: SettingRow {
+            label: "Own delay after";
+            Toggle {
+                checked: AppState.edit.delay-override;
+                toggled(v) => {
+                    AppState.edit.delay-override = v;
+                    AppState.editor-edit(AppState.edit);
+                }
+            }
+            NumberField {
+                value: AppState.edit.delay-ms;
+                maximum: 60000;
+                enabled: AppState.edit.delay-override;
+                edited(v) => {
+                    AppState.edit.delay-ms = v;
+                    AppState.editor-edit(AppState.edit);
+                }
+            }
+        }
+        if AppState.edit-error != "": Text {
+            text: AppState.edit-error;
+            color: Theme.text-strong;
+            font-size: Theme.font-label;
+            wrap: word-wrap;
+        }
+    }
+}
+
+export component SequenceEditorPage inherits Rectangle {
+    property <bool> has-selection: AppState.selected-step >= 0;
+
+    VerticalLayout {
+        padding: Theme.padding;
+        spacing: Theme.spacing;
+
+        HorizontalLayout {
+            spacing: 8px;
+            BackButton { clicked => { AppState.navigate(1); } }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                Text {
+                    text: "Custom sequence";
+                    color: Theme.text-strong;
+                    font-size: Theme.font-body;
+                    font-weight: Theme.weight-medium;
+                }
+                Text {
+                    text: AppState.active-profile == "" ? "Not saved as a profile" : "Profile: " + AppState.active-profile;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-caption;
+                    overflow: elide;
+                }
+            }
+            Button {
+                text: AppState.show-preview ? "Steps" : "Preview";
+                clicked => {
+                    if AppState.show-preview {
+                        AppState.show-preview = false;
+                    } else {
+                        AppState.editor-preview();
+                    }
+                }
+            }
+            ConfirmButton {
+                text: "Reset";
+                confirm-text: "Reset?";
+                confirmed => { AppState.editor-reset(); }
+            }
+        }
+
+        if !AppState.show-preview: HorizontalLayout {
+            spacing: Theme.spacing-small;
+            AddStepButton { picked(i) => { AppState.editor-add(i); } }
+            Button { text: "Duplicate"; enabled: root.has-selection; clicked => { AppState.editor-duplicate(); } }
+            Button { text: "Up"; enabled: AppState.selected-step > 0; clicked => { AppState.editor-move(-1); } }
+            Button {
+                text: "Down";
+                enabled: root.has-selection && AppState.selected-step < AppState.steps.length - 1;
+                clicked => { AppState.editor-move(1); }
+            }
+            Rectangle { }
+            Button { text: "Delete"; enabled: root.has-selection; clicked => { AppState.editor-delete(); } }
+        }
+
+        Panel {
+            vertical-stretch: 1;
+            min-height: 110px;
+            if !AppState.show-preview && AppState.steps.length == 0: Text {
+                width: parent.width;
+                height: parent.height;
+                text: "No steps. Use Add step to build a sequence.";
+                color: Theme.text-muted;
+                font-size: Theme.font-label;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            if !AppState.show-preview: ScrollPanel {
+                x: 4px;
+                y: 4px;
+                width: parent.width - 8px;
+                height: parent.height - 8px;
+                content-spacing: 1px;
+                for step[i] in AppState.steps: ListItem {
+                    index-text: i + 1;
+                    text: step.title;
+                    detail: step.detail;
+                    error: step.error;
+                    selected: i == AppState.selected-step;
+                    clicked => { AppState.editor-select(i); }
+                }
+            }
+            if AppState.show-preview: ScrollPanel {
+                x: 10px;
+                y: 6px;
+                width: parent.width - 16px;
+                height: parent.height - 12px;
+                content-spacing: 2px;
+                for line in AppState.preview-lines: HorizontalLayout {
+                    spacing: 12px;
+                    Text {
+                        text: line.time;
+                        width: 64px;
+                        color: Theme.text-muted;
+                        font-size: Theme.font-label;
+                        horizontal-alignment: right;
+                    }
+                    Text {
+                        text: line.action;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-label;
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+        }
+
+        if !AppState.show-preview && root.has-selection: StepForm { }
+
+        Text {
+            text: AppState.validation-text;
+            color: AppState.sequence-valid ? Theme.text-muted : Theme.text-strong;
+            font-size: Theme.font-caption;
+            wrap: word-wrap;
+        }
+    }
+}
