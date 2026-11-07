@@ -1,6 +1,6 @@
 [package]
 name = "mentos-macro"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Keyboard sequence automation for Linux X11 with an optional step-based sequence editor"

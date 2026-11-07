@@ -6,6 +6,10 @@ cd "$(dirname "$0")/.."
 PREFIX="${PREFIX:-$HOME/.local}"
 BINDIR="$PREFIX/bin"
 
+if pgrep -x mentos-macro >/dev/null 2>&1; then
+    echo "Note: $(basename "$0" .sh): mentos-macro is running. Close it after installing so the new version starts."
+fi
+
 if [ -x dist/mentos-macro ] && [ "${REBUILD:-0}" != "1" ]; then
     BIN=dist/mentos-macro
 else
@@ -21,5 +25,5 @@ sed "s|@BINDIR@|$BINDIR|g" packaging/mentos-macro.desktop > "$PREFIX/share/appli
 chmod 644 "$PREFIX/share/applications/mentos-macro.desktop"
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q "$PREFIX/share/applications" || true
 
-echo "Installed $BINDIR/mentos-macro"
+echo "Installed $("$BINDIR/mentos-macro" --version) to $BINDIR/mentos-macro"
 case ":$PATH:" in *":$BINDIR:"*) ;; *) echo "Note: $BINDIR is not in PATH; the desktop entry uses the full path." ;; esac
